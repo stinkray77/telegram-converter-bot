@@ -7,22 +7,18 @@ from typing import Dict, Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import Update, Document
+from telegram import Update, Document, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
     CommandHandler, 
     MessageHandler, 
     filters, 
-    ContextTypes
+    ContextTypes,
+    CallbackQueryHandler
 )
 
 # File conversion imports
 from PIL import Image
-import fitz  # PyMuPDF for PDF operations
-from moviepy.editor import VideoFileClip
-import pandas as pd
-from docx import Document as DocxDocument
-import subprocess
 
 # Configure logging
 logging.basicConfig(
@@ -37,19 +33,7 @@ class FileConverter:
     SUPPORTED_CONVERSIONS = {
         'image': {
             'from': ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp'],
-            'to': ['.jpg', '.png', '.pdf', '.webp']
-        },
-        'document': {
-            'from': ['.pdf', '.docx', '.txt'],
-            'to': ['.pdf', '.txt', '.docx']
-        },
-        'video': {
-            'from': ['.mp4', '.avi', '.mov', '.mkv', '.webm'],
-            'to': ['.mp4', '.gif', '.mp3']  # mp3 for audio extraction
-        },
-        'data': {
-            'from': ['.csv', '.xlsx', '.json'],
-            'to': ['.csv', '.xlsx', '.json']
+            'to': ['.jpg', '.png', '.webp']
         }
     }
     
@@ -72,115 +56,10 @@ class FileConverter:
                     background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
                     img = background
                 
-                if target_format.lower() == 'pdf':
-                    img.save(output_path, 'PDF', resolution=100.0)
-                else:
-                    img.save(output_path, target_format)
+                img.save(output_path, target_format.upper())
             return True
         except Exception as e:
             logger.error(f"Image conversion error: {e}")
-            return False
-    
-    @staticmethod
-    def convert_document(input_path: str, output_path: str, target_format: str) -> bool:
-        """Convert document files"""
-        try:
-            input_ext = Path(input_path).suffix.lower()
-            
-            if input_ext == '.pdf' and target_format == 'txt':
-                # PDF to text
-                doc = fitz.open(input_path)
-                text = ""
-                for page in doc:
-                    text += page.get_text()
-                doc.close()
-                
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(text)
-                return True
-                
-            elif input_ext == '.docx' and target_format == 'txt':
-                # DOCX to text
-                doc = DocxDocument(input_path)
-                text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-                
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(text)
-                return True
-                
-            elif input_ext == '.txt' and target_format == 'pdf':
-                # Text to PDF (using reportlab would be better, but keeping dependencies minimal)
-                # This is a simplified conversion
-                subprocess.run([
-                    'python', '-c',
-                    f"""
-import fitz
-doc = fitz.open()
-page = doc.new_page()
-with open('{input_path}', 'r', encoding='utf-8') as f:
-    text = f.read()
-page.insert_text((72, 72), text, fontsize=12)
-doc.save('{output_path}')
-doc.close()
-"""
-                ], check=True)
-                return True
-                
-        except Exception as e:
-            logger.error(f"Document conversion error: {e}")
-            return False
-        
-        return False
-    
-    @staticmethod
-    def convert_video(input_path: str, output_path: str, target_format: str) -> bool:
-        """Convert video files"""
-        try:
-            if target_format == 'mp3':
-                # Extract audio
-                clip = VideoFileClip(input_path)
-                clip.audio.write_audiofile(output_path)
-                clip.close()
-            elif target_format == 'gif':
-                # Convert to GIF (first 10 seconds to keep size reasonable)
-                clip = VideoFileClip(input_path).subclip(0, min(10, VideoFileClip(input_path).duration))
-                clip.write_gif(output_path, fps=10)
-                clip.close()
-            else:
-                # Video format conversion
-                clip = VideoFileClip(input_path)
-                clip.write_videofile(output_path)
-                clip.close()
-            return True
-        except Exception as e:
-            logger.error(f"Video conversion error: {e}")
-            return False
-    
-    @staticmethod
-    def convert_data(input_path: str, output_path: str, target_format: str) -> bool:
-        """Convert data files"""
-        try:
-            input_ext = Path(input_path).suffix.lower()
-            
-            if input_ext == '.csv':
-                df = pd.read_csv(input_path)
-            elif input_ext == '.xlsx':
-                df = pd.read_excel(input_path)
-            elif input_ext == '.json':
-                df = pd.read_json(input_path)
-            else:
-                return False
-            
-            if target_format == 'csv':
-                df.to_csv(output_path, index=False)
-            elif target_format == 'xlsx':
-                df.to_excel(output_path, index=False)
-            elif target_format == 'json':
-                df.to_json(output_path, orient='records', indent=2)
-            
-            return True
-        except Exception as e:
-            logger.error(f"Data conversion error: {e}")
             return False
 
 class TelegramBot:
@@ -196,14 +75,16 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("formats", self.show_formats))
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
+        self.application.add_handler(CallbackQueryHandler(self.handle_conversion, pattern="^convert_"))
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send a message when the command /start is issued"""
         welcome_message = (
             "🤖 Welcome to File Converter Bot!\n\n"
-            "Send me files and I'll help you convert them to different formats.\n"
+            "Send me image files and I'll help you convert them to different formats.\n"
             "Use /help to see available commands.\n"
-            "Use /formats to see supported file types."
+            "Use /formats to see supported file types.\n\n"
+            "📸 Currently supporting: JPG, PNG, WebP, BMP, GIF, TIFF"
         )
         await update.message.reply_text(welcome_message)
     
@@ -215,11 +96,11 @@ class TelegramBot:
             "/help - Show this help message\n"
             "/formats - Show supported file formats\n\n"
             "📁 How to use:\n"
-            "1. Send me a file\n"
+            "1. Send me an image file\n"
             "2. Choose the target format from the buttons\n"
             "3. Wait for conversion to complete\n"
             "4. Download your converted file!\n\n"
-            "Supported conversions: Images, Documents, Videos, Data files"
+            "🎯 Currently supporting image conversions only"
         )
         await update.message.reply_text(help_message)
     
@@ -245,13 +126,14 @@ class TelegramBot:
         file_name = f"image_{photo.file_id}.jpg"
         await self.process_file(update, context, photo, file_name)
     
-    MAX_FILE_SIZE = 50 * 1024 * 1024 # 50MB
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
     async def process_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                           file_obj: Document, file_name: str):
-        if file_obj.file_size > MAX_FILE_SIZE:
+        if file_obj.file_size > self.MAX_FILE_SIZE:
             await update.message.reply_text("❌ File too large. Maximum size is 50MB.")
             return
+        
         """Process uploaded file and show conversion options"""
         file_extension = Path(file_name).suffix
         file_category = self.converter.get_file_category(file_extension)
@@ -259,7 +141,8 @@ class TelegramBot:
         if file_category == 'unknown':
             await update.message.reply_text(
                 f"❌ Unsupported file type: {file_extension}\n"
-                "Use /formats to see supported formats."
+                "Use /formats to see supported formats.\n\n"
+                "🎯 Currently only image files are supported."
             )
             return
         
@@ -284,8 +167,6 @@ class TelegramBot:
             return
         
         # Create inline keyboard with format options
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
         keyboard = []
         for fmt in conversion_options:
             callback_data = f"convert_{fmt[1:]}"  # Remove the dot
@@ -330,8 +211,8 @@ class TelegramBot:
             output_path = os.path.join(temp_dir, output_filename)
             
             # Perform conversion
-            success = await self.convert_file(input_path, output_path, 
-                                            file_info['category'], target_format)
+            success = self.convert_file(input_path, output_path, 
+                                      file_info['category'], target_format)
             
             if success and os.path.exists(output_path):
                 # Send converted file
@@ -354,27 +235,15 @@ class TelegramBot:
             logger.error(f"Conversion error: {e}")
             await query.edit_message_text("❌ An error occurred during conversion.")
     
-    async def convert_file(self, input_path: str, output_path: str, 
-                          category: str, target_format: str) -> bool:
+    def convert_file(self, input_path: str, output_path: str, 
+                    category: str, target_format: str) -> bool:
         """Convert file based on category"""
         if category == 'image':
             return self.converter.convert_image(input_path, output_path, target_format)
-        elif category == 'document':
-            return self.converter.convert_document(input_path, output_path, target_format)
-        elif category == 'video':
-            return self.converter.convert_video(input_path, output_path, target_format)
-        elif category == 'data':
-            return self.converter.convert_data(input_path, output_path, target_format)
         return False
     
     def run(self):
-        """Start the bot"""
-        from telegram.ext import CallbackQueryHandler
-        
-        # Add callback query handler for conversion buttons
-        self.application.add_handler(CallbackQueryHandler(self.handle_conversion, 
-                                                         pattern="^convert_"))
-        
+        """Start the bot"""        
         logger.info("Starting File Converter Bot...")
         self.application.run_polling()
 
